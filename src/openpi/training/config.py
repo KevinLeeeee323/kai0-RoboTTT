@@ -2468,10 +2468,10 @@ _CONFIGS = [
         data=LerobotAgilexDataConfig(
             repo_id = "Path/to/your/advantage/dataset",
             assets=AssetsConfig(
-                assets_dir="Path/to/your/advantage/dataset/assets",
-                asset_id="Your_advantage_dataset_name",
+                assets_dir="/home/hdy/kai0/stage_advantage/assets",
+                asset_id="boil",
             ),
-            default_prompt="Flatten and fold the cloth.",
+            default_prompt="Pick up the funnel and put it back on the funnel rack, place the distillation rack, turn the reactor knob",
             # * why removing "prompt" here will lead to an error in transforms.py
             repack_transforms=_transforms.Group(
                 inputs=[
@@ -2500,7 +2500,7 @@ _CONFIGS = [
             ]
             )
         ),
-        pytorch_weight_path="Path/to/your/pi05_base/checkpoint",
+        pytorch_weight_path="/mnt/hdy/kai0-main/weights_cache/openpi-assets/checkpoints/pi05_base/params",
         num_train_steps=100_000,
         keep_period=10000,
         save_interval=10000,

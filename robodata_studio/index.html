@@ -404,6 +404,29 @@
       </section>
 
       <section id="replay" class="view">
+        <div class="panel sequence-panel">
+          <div class="section-head">
+            <div>
+              <h2>Action Sequence Chunks</h2>
+              <p>展开每次 infer 返回的 action_sequence 与实际发布的 executed_action_sequence，并标出 chunk 边界。</p>
+            </div>
+            <div class="compare-controls compact-controls">
+              <select id="sequenceDimSelect"></select>
+              <span id="sequenceStatus">-</span>
+            </div>
+          </div>
+          <div id="sequenceStats" class="metric-grid small-metrics"></div>
+          <div class="sequence-layout">
+            <div class="chart-shell sequence-chart-shell">
+              <canvas id="sequenceCanvas" height="520"></canvas>
+            </div>
+            <div class="sequence-side">
+              <h3>Largest Boundary Jumps</h3>
+              <div id="sequenceBoundaryList" class="compact-list"></div>
+            </div>
+          </div>
+        </div>
+
         <div class="panel">
           <div class="section-head">
             <div>

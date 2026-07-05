@@ -34,6 +34,7 @@ _jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
 _dataset_roots: dict[str, Path] = {}
 _dataset_roots_lock = threading.Lock()
+EXTRA_VIEWER_NUMERIC_KEYS = {"stage_progress_gt"}
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -106,6 +107,42 @@ def text_feature_keys(info: dict[str, Any]) -> list[str]:
         for key, feature in (info.get("features") or {}).items()
         if str((feature or {}).get("dtype") or "").lower() in {"string", "str", "utf8"}
     )
+
+
+def parquet_extra_numeric_keys(schema: Any) -> list[str]:
+    output: list[str] = []
+    names = set(getattr(schema, "names", []) or [])
+    for key in sorted(EXTRA_VIEWER_NUMERIC_KEYS):
+        if key not in names:
+            continue
+        try:
+            dtype = str(schema.field(key).type).lower()
+        except Exception:
+            dtype = ""
+        if dtype.startswith(("bool", "int", "uint", "float", "double", "halffloat")):
+            output.append(key)
+    return output
+
+
+def stage_progress_values(row_count: int, episode: dict[str, Any] | None) -> list[float]:
+    segments = (episode or {}).get("subtask_stage_segments") or []
+    if row_count <= 0 or not isinstance(segments, list) or not segments:
+        return []
+    values = [0.0] * row_count
+    stage_count = len(segments)
+    for stage_index, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            continue
+        start = max(0, int(segment.get("start_frame") or 0))
+        end = min(row_count, int(segment.get("end_frame") or 0))
+        if end <= start:
+            continue
+        segment_length = end - start
+        for frame_index in range(start, end):
+            values[frame_index] = (stage_index / stage_count) + (1 / stage_count) * (
+                (frame_index - start) / segment_length
+            )
+    return values
 
 
 def dataset_id_for_path(root: Path) -> str:
@@ -1010,18 +1047,34 @@ def api_episode_series(dataset_id: str, episode_name: str) -> Response:
     root = dataset_root(unquote(dataset_id))
     normalized_episode = unquote(episode_name)
     info = load_json(root / "meta" / "info.json", {})
-    numeric_keys = feature_keys(info, numeric=True)
+    pq = import_pyarrow_parquet()
+    parquet_path = episode_parquet_path(root, info, normalized_episode)
+    parquet_schema = pq.ParquetFile(parquet_path).schema_arrow
+    available_columns = set(parquet_schema.names)
+    numeric_keys = [
+        key
+        for key in sorted({*feature_keys(info, numeric=True), *parquet_extra_numeric_keys(parquet_schema)})
+        if key in available_columns
+    ]
     text_keys = text_feature_keys(info)
     base_columns = ["timestamp", "frame_index", "episode_index", "index", "task_index"]
     columns = [
         column
         for column in [*base_columns, *numeric_keys, *text_keys]
-        if column in (info.get("features") or {}) or column in base_columns
+        if column in available_columns
     ]
-    pq = import_pyarrow_parquet()
-    table = pq.read_table(episode_parquet_path(root, info, normalized_episode), columns=columns)
+    table = pq.read_table(parquet_path, columns=columns)
     rows = table.to_pylist()
     feature_data = {key: [row_value_to_list(row.get(key)) for row in rows] for key in numeric_keys if key in table.column_names}
+    if "stage_progress_gt" not in feature_data and "stage_progress_gt" in (info.get("features") or {}):
+        episode_index = episode_index_from_name(normalized_episode)
+        episode_meta = next(
+            (item for item in load_jsonl(root / "meta" / "episodes.jsonl") if int(item.get("episode_index", -1)) == episode_index),
+            None,
+        )
+        progress_values = stage_progress_values(len(rows), episode_meta)
+        if progress_values:
+            feature_data["stage_progress_gt"] = [[value] for value in progress_values]
     text_data = {key: [str(row.get(key) or "") for row in rows] for key in text_keys if key in table.column_names}
     features = info.get("features") or {}
     feature_meta = {}
@@ -1031,8 +1084,8 @@ def api_episode_series(dataset_id: str, episode_name: str) -> Response:
             names = names[0]
         feature_meta[key] = {
             "names": names if isinstance(names, list) else [],
-            "shape": (features.get(key) or {}).get("shape"),
-            "dtype": (features.get(key) or {}).get("dtype"),
+            "shape": (features.get(key) or {}).get("shape") or [1],
+            "dtype": (features.get(key) or {}).get("dtype") or str(parquet_schema.field(key).type),
         }
     row_meta = [
         {

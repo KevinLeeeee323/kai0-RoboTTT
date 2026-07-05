@@ -98,8 +98,8 @@ echo "==================== Start Training ===================="
 # solid2boat_agilex
 
 
-NAME="solid2boat_agilex"
-ASSET_ID="solid2boat_agilex"
+NAME="boat2reactor_agilex"
+ASSET_ID="boat2reactor_agilex"
 CKPT_STEP="10000"
 SSH_PORT="2222"
 

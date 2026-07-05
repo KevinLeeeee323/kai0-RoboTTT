@@ -24,6 +24,7 @@ let playTimer = null;
 let currentEpisodeName = null;
 let imageRequestToken = 0;
 let replayDim = 0;
+let sequenceAutoSelectKey = null;
 let compareDataset = null;
 let compareEpisodes = [];
 let compareSeries = null;
@@ -132,6 +133,8 @@ function setView(viewId) {
   if (viewId === "replay") {
     renderReplayControls();
     drawReplayCanvas();
+    renderSequencePanel();
+    drawSequenceCanvas();
     drawCompareCanvas();
   }
 }
@@ -236,9 +239,11 @@ function renderFeatureOptions(keys) {
   const available = Array.from(select.options).map((option) => option.value);
   currentFeature = available.includes(previous)
     ? previous
-    : available.includes("action")
-      ? "action"
-      : keys[0] || null;
+    : available.includes("stage_progress_gt")
+      ? "stage_progress_gt"
+      : available.includes("action")
+        ? "action"
+        : keys[0] || null;
   select.value = currentFeature || "";
 }
 
@@ -297,6 +302,8 @@ async function loadEpisode(episodeName) {
   drawFeatureCanvas();
   renderReplayControls();
   renderReplayPanel();
+  renderSequencePanel();
+  drawSequenceCanvas();
   drawCompareCanvas();
 }
 
@@ -353,8 +360,11 @@ async function renderCurrentImages() {
 function renderCurrentRow() {
   if (!currentSeries) return;
   const row = currentSeries.rowMeta?.[currentRow] || {};
+  const stageProgress = Number(featureRow(currentSeries, "stage_progress_gt", currentRow)?.[0]);
+  const stageProgressMeta = Number.isFinite(stageProgress) ? { stage_progress_gt: stageProgress } : {};
+  const stageProgressText = Number.isFinite(stageProgress) ? ` | stage_progress_gt ${formatNumber(stageProgress)}` : "";
   $("#rowRange").value = String(currentRow);
-  $("#rowReadout").textContent = `row ${currentRow} / ${Math.max((currentSeries.rowCount || 1) - 1, 0)} · frame ${row.frame_index ?? "-"} · task ${row.task_index ?? "-"}`;
+  $("#rowReadout").textContent = `row ${currentRow} / ${Math.max((currentSeries.rowCount || 1) - 1, 0)} | frame ${row.frame_index ?? "-"} | task ${row.task_index ?? "-"}${stageProgressText}`;
   const text = Object.fromEntries(Object.entries(currentSeries.textData || {}).map(([key, values]) => {
     const value = values[currentRow] ?? "";
     if (key.endsWith("action_sequence") && value) {
@@ -373,8 +383,10 @@ function renderCurrentRow() {
     name: featureNames[index] || `dim ${index}`,
     value,
   }));
-  $("#rowJson").textContent = JSON.stringify({ ...row, ...text, selectedFeature: currentFeature, selectedFeatureValues: namedFeature }, null, 2);
+  $("#rowJson").textContent = JSON.stringify({ ...row, ...stageProgressMeta, ...text, selectedFeature: currentFeature, selectedFeatureValues: namedFeature }, null, 2);
   renderReplayPanel();
+  renderSequencePanel();
+  drawSequenceCanvas();
 }
 
 function currentFeatureSeries() {
@@ -469,6 +481,11 @@ function replayAvailable(series = currentSeries) {
   return ["action", "expert.action", "action.error"].every((key) => keys.includes(key));
 }
 
+function sequenceAvailable(series = currentSeries) {
+  const text = series?.textData || {};
+  return Boolean(text.action_sequence?.length || text.executed_action_sequence?.length);
+}
+
 function actionNames() {
   return featureDimNames("action");
 }
@@ -476,6 +493,7 @@ function actionNames() {
 function renderReplayControls() {
   const episodeSelect = $("#replayEpisodeSelect");
   const dimSelect = $("#replayDimSelect");
+  const sequenceDimSelect = $("#sequenceDimSelect");
   if (!episodeSelect || !dimSelect) return;
   episodeSelect.innerHTML = "";
   currentEpisodes.filter((episode) => episode.exists).forEach((episode) => {
@@ -487,23 +505,34 @@ function renderReplayControls() {
   episodeSelect.value = currentEpisodeName || episodeSelect.value;
 
   const names = actionNames();
-  dimSelect.innerHTML = "";
+  const selects = [dimSelect, sequenceDimSelect].filter(Boolean);
+  selects.forEach((select) => {
+    select.innerHTML = "";
+  });
   if (!names.length) {
     const option = document.createElement("option");
     option.textContent = "No action dims";
-    dimSelect.appendChild(option);
-    dimSelect.disabled = true;
+    selects.forEach((select) => {
+      select.appendChild(option.cloneNode(true));
+      select.disabled = true;
+    });
     return;
   }
-  dimSelect.disabled = false;
+  selects.forEach((select) => {
+    select.disabled = false;
+  });
   replayDim = Math.min(replayDim, names.length - 1);
   names.forEach((name, index) => {
-    const option = document.createElement("option");
-    option.value = String(index);
-    option.textContent = name;
-    dimSelect.appendChild(option);
+    selects.forEach((select) => {
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = `${index} · ${name}`;
+      select.appendChild(option);
+    });
   });
-  dimSelect.value = String(replayDim);
+  selects.forEach((select) => {
+    select.value = String(replayDim);
+  });
 }
 
 function renderReplayPanel() {
@@ -553,13 +582,159 @@ function renderReplayPanel() {
       renderReplayControls();
       renderReplayPanel();
       drawReplayCanvas();
+      renderSequencePanel();
+      drawSequenceCanvas();
     });
     body.appendChild(row);
   }
   drawReplayCanvas();
 }
 
-function drawLineChart(canvas, seriesList, cursorIndex = 0, message = "No data") {
+function parseSequenceCell(value) {
+  if (!value) return [];
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function expandSequence(key, dim) {
+  const rows = currentSeries?.textData?.[key] || [];
+  const values = [];
+  const chunkStarts = [];
+  const chunkLengths = [];
+  rows.forEach((cell) => {
+    const sequence = parseSequenceCell(cell);
+    if (!sequence.length) return;
+    chunkStarts.push(values.length);
+    chunkLengths.push(sequence.length);
+    sequence.forEach((action) => values.push(Number(action?.[dim])));
+  });
+  return { values, chunkStarts, chunkLengths };
+}
+
+function sequenceBoundaryStats(dim) {
+  const actionRows = currentSeries?.textData?.action_sequence || [];
+  const executedRows = currentSeries?.textData?.executed_action_sequence || [];
+  const jumps = [];
+  for (let index = 0; index < actionRows.length - 1; index += 1) {
+    const next = parseSequenceCell(actionRows[index + 1]);
+    const executed = parseSequenceCell(executedRows[index]);
+    const previous = executed.length ? executed : parseSequenceCell(actionRows[index]);
+    if (!next.length || !previous.length) continue;
+    const delta = Math.abs(Number(next[0]?.[dim]) - Number(previous[previous.length - 1]?.[dim]));
+    if (Number.isFinite(delta)) jumps.push({ index, value: delta });
+  }
+  return jumps;
+}
+
+function sequenceAllDimBoundaryStats() {
+  const width = currentSeries?.featureData?.action?.[0]?.length || actionNames().length || 14;
+  return Array.from({ length: width }, (_, dim) => {
+    const jumps = sequenceBoundaryStats(dim);
+    const values = jumps.map((item) => item.value);
+    return {
+      dim,
+      name: actionNames()[dim] || `dim ${dim}`,
+      mean: mean(values),
+      max: maxValue(values),
+      jumps,
+    };
+  });
+}
+
+function maybeAutoSelectSequenceDim() {
+  if (!sequenceAvailable()) return;
+  const key = `${selectedDataset?.id || ""}:${currentEpisodeName || ""}`;
+  if (sequenceAutoSelectKey === key) return;
+  const ranked = sequenceAllDimBoundaryStats()
+    .filter((item) => Number.isFinite(item.max))
+    .sort((a, b) => b.max - a.max);
+  if (ranked.length && ranked[0].max > 1e-6) {
+    replayDim = ranked[0].dim;
+  }
+  sequenceAutoSelectKey = key;
+}
+
+function renderSequencePanel() {
+  const stats = $("#sequenceStats");
+  const status = $("#sequenceStatus");
+  const boundaryList = $("#sequenceBoundaryList");
+  if (!stats || !status) return;
+  if (!sequenceAvailable()) {
+    status.textContent = "missing action_sequence";
+    renderMetricCards(stats, [
+      { label: "Sequence", value: "missing" },
+      { label: "Required", value: "action_sequence" },
+    ]);
+    if (boundaryList) boundaryList.innerHTML = "<p>No chunk sequence fields in this dataset.</p>";
+    drawSequenceCanvas();
+    return;
+  }
+  maybeAutoSelectSequenceDim();
+  ["#replayDimSelect", "#sequenceDimSelect"].forEach((selector) => {
+    const select = $(selector);
+    if (select && Array.from(select.options).some((option) => Number(option.value) === replayDim)) {
+      select.value = String(replayDim);
+    }
+  });
+  const model = expandSequence("action_sequence", replayDim);
+  const executed = expandSequence("executed_action_sequence", replayDim);
+  const jumps = sequenceBoundaryStats(replayDim);
+  const jumpValues = jumps.map((item) => item.value);
+  const allDims = sequenceAllDimBoundaryStats()
+    .filter((item) => Number.isFinite(item.max))
+    .sort((a, b) => b.max - a.max);
+  const currentStart = model.chunkStarts[currentRow] ?? 0;
+  status.textContent = `${actionNames()[replayDim] || `dim ${replayDim}`} · row ${currentRow}`;
+  renderMetricCards(stats, [
+    { label: "Chunks", value: formatCount(model.chunkStarts.length) },
+    { label: "Model steps", value: formatCount(model.values.length) },
+    { label: "Executed steps", value: formatCount(executed.values.length) },
+    { label: "Boundary mean", value: formatNumber(mean(jumpValues)) },
+    { label: "Boundary max", value: formatNumber(maxValue(jumpValues)) },
+    { label: "Worst dim", value: allDims[0] ? `${allDims[0].dim} ${allDims[0].name}` : "-" },
+    { label: "Cursor step", value: formatCount(currentStart) },
+  ]);
+  if (boundaryList) {
+    const sorted = [...jumps].sort((a, b) => b.value - a.value).slice(0, 4);
+    const dimRows = allDims.slice(0, 7).map((item) => `
+      <button type="button" class="list-row sequence-jump-row ${item.dim === replayDim ? "selected-row-button" : ""}" data-sequence-dim="${item.dim}">
+        <strong>${item.dim} - ${escapeHtml(item.name)}</strong>
+        <span>max</span>
+        <span>${formatNumber(item.max)}</span>
+      </button>
+    `).join("");
+    const boundaryRows = sorted.map((item) => `
+      <div class="list-row sequence-jump-row sequence-boundary-row">
+        <strong>chunk ${item.index} -> ${item.index + 1}</strong>
+        <span>${escapeHtml(actionNames()[replayDim] || `dim ${replayDim}`)}</span>
+        <span>${formatNumber(item.value)}</span>
+      </div>
+    `).join("");
+    boundaryList.innerHTML = dimRows
+      ? `
+          <div class="sequence-list-heading">Worst dims</div>
+          ${dimRows}
+          <div class="sequence-list-heading">Selected dim boundaries</div>
+          ${boundaryRows || "<p>No finite boundary jumps for selected dim.</p>"}
+        `
+      : "<p>No finite boundary jumps.</p>";
+    boundaryList.querySelectorAll("[data-sequence-dim]").forEach((button) => {
+      button.addEventListener("click", () => {
+        replayDim = Number(button.dataset.sequenceDim) || 0;
+        renderReplayControls();
+        renderReplayPanel();
+        renderSequencePanel();
+        drawSequenceCanvas();
+      });
+    });
+  }
+}
+
+function drawLineChart(canvas, seriesList, cursorIndex = 0, message = "No data", markers = []) {
   const ctx = canvas.getContext("2d");
   const ratio = window.devicePixelRatio || 1;
   const width = Math.max(canvas.clientWidth || 600, 320);
@@ -592,6 +767,16 @@ function drawLineChart(canvas, seriesList, cursorIndex = 0, message = "No data")
   ctx.lineTo(width - pad, height - pad);
   ctx.stroke();
 
+  ctx.strokeStyle = "rgba(23, 33, 31, 0.18)";
+  ctx.lineWidth = 1;
+  markers.forEach((marker) => {
+    const markerX = x(Math.min(Math.max(marker, 0), longest - 1));
+    ctx.beginPath();
+    ctx.moveTo(markerX, pad);
+    ctx.lineTo(markerX, height - pad);
+    ctx.stroke();
+  });
+
   seriesList.forEach((item) => {
     ctx.strokeStyle = item.color;
     ctx.lineWidth = item.dashed ? 1.2 : 1.8;
@@ -613,6 +798,15 @@ function drawLineChart(canvas, seriesList, cursorIndex = 0, message = "No data")
   ctx.moveTo(cursorX, pad);
   ctx.lineTo(cursorX, height - pad);
   ctx.stroke();
+
+  let labelX = pad + 4;
+  seriesList.forEach((item) => {
+    ctx.fillStyle = item.color;
+    ctx.fillRect(labelX, 10, 14, 3);
+    ctx.fillStyle = "#17211f";
+    ctx.fillText(item.label, labelX + 18, 14);
+    labelX += Math.min(180, 28 + item.label.length * 7);
+  });
 }
 
 function drawReplayCanvas() {
@@ -630,6 +824,25 @@ function drawReplayCanvas() {
     { label: "expert", values: expert, color: "#2563eb", dashed: true },
     { label: "error", values: error, color: "#dc2626" },
   ], currentRow);
+}
+
+function drawSequenceCanvas() {
+  const canvas = $("#sequenceCanvas");
+  if (!canvas) return;
+  if (!sequenceAvailable()) {
+    drawLineChart(canvas, [], 0, "Current dataset has no action_sequence fields");
+    return;
+  }
+  const model = expandSequence("action_sequence", replayDim);
+  const executed = expandSequence("executed_action_sequence", replayDim);
+  const series = [
+    { label: "action_sequence", values: model.values, color: "#2563eb" },
+  ];
+  if (executed.values.length) {
+    series.push({ label: "executed_action_sequence", values: executed.values, color: "#dc2626", dashed: true });
+  }
+  const cursor = model.chunkStarts[currentRow] ?? 0;
+  drawLineChart(canvas, series, cursor, "No finite action sequence values", model.chunkStarts);
 }
 
 async function ensureCompareEpisodes(dataset) {
@@ -736,6 +949,8 @@ function stepRow(offset) {
   renderCurrentImages();
   drawFeatureCanvas();
   drawReplayCanvas();
+  renderSequencePanel();
+  drawSequenceCanvas();
   drawCompareCanvas();
 }
 
@@ -1241,6 +1456,8 @@ $("#rowRange").addEventListener("input", (event) => {
   renderCurrentImages();
   drawFeatureCanvas();
   drawReplayCanvas();
+  renderSequencePanel();
+  drawSequenceCanvas();
   drawCompareCanvas();
 });
 $("#prevRowButton").addEventListener("click", () => stepRow(-1));
@@ -1272,7 +1489,17 @@ $("#previewInferButton").addEventListener("click", previewInference);
 $("#replayEpisodeSelect").addEventListener("change", (event) => loadEpisode(event.target.value));
 $("#replayDimSelect").addEventListener("change", (event) => {
   replayDim = Number(event.target.value) || 0;
+  renderReplayControls();
   renderReplayPanel();
+  renderSequencePanel();
+  drawSequenceCanvas();
+});
+$("#sequenceDimSelect").addEventListener("change", (event) => {
+  replayDim = Number(event.target.value) || 0;
+  renderReplayControls();
+  renderReplayPanel();
+  renderSequencePanel();
+  drawSequenceCanvas();
 });
 $("#compareDatasetSelect").addEventListener("change", (event) => updateCompareDataset(event.target.value));
 $("#compareFeatureSelect").addEventListener("change", (event) => {
@@ -1288,6 +1515,7 @@ $("#clearCompareButton").addEventListener("click", () => {
 window.addEventListener("resize", () => {
   drawFeatureCanvas();
   drawReplayCanvas();
+  drawSequenceCanvas();
   drawCompareCanvas();
 });
 window.addEventListener("beforeunload", stopPlayback);
