@@ -989,6 +989,13 @@ def split_batch(args: argparse.Namespace) -> dict[str, Any]:
                     raise RuntimeError(f"stage_progress_gt not generated: {source_episode_path}")
 
                 new_episode_index = len(output_episodes)
+                annotated_table = _rewrite_table(
+                    annotated_table,
+                    new_episode_index=new_episode_index,
+                    global_start_index=total_frames,
+                    task_index=int(episode.get("task_index", 0)),
+                )
+
                 boundaries, stages = _episode_boundary_annotation(plans)
 
                 output_episode = dict(episode)
