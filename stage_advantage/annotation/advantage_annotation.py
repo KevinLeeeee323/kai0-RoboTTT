@@ -148,6 +148,11 @@ class VideoJob:
     start_frame: int
     frame_count: int
 
+@dataclass(frozen=True)
+class CopyVideoJob:
+    source_video: Path
+    output_video: Path
+
 
 def _parse_specs(text: str, preset: str) -> list[SubtaskSpec]:
     specs: list[SubtaskSpec] = []
@@ -849,8 +854,6 @@ def _annotate_table_with_stage_progress(table: Any, plans: list[SegmentPlan], st
     return _set_or_append_column(table, "stage_progress_gt", stage_progress, dtype="float32")
 
 def _annotated_dataset_root(source: SourceDataset, output_root: Path, source_count: int) -> Path:
-    if source_count == 1:
-        return output_root
     return output_root / source.root.name
 
 def _episode_boundary_annotation(plans: list[SegmentPlan]) -> tuple[list[int], list[dict[str, Any]]]:
@@ -876,6 +879,41 @@ def _episode_boundary_annotation(plans: list[SegmentPlan]) -> tuple[list[int], l
 
     return boundaries, stages
 
+def _copy_video_job(job: CopyVideoJob) -> bool:
+    if not job.source_video.exists():
+        print(f"warning: missing video {job.source_video}", file=sys.stderr)
+        return False
+
+    job.output_video.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(job.source_video, job.output_video)
+    return True
+
+def _copy_videos(video_jobs: list[CopyVideoJob], args: argparse.Namespace) -> tuple[int, int]:
+    if not video_jobs:
+        return 0, 0
+
+    workers = max(1, int(args.video_workers))
+    if workers == 1 or len(video_jobs) == 1:
+        copied = 0
+        missing = 0
+        for job in video_jobs:
+            if _copy_video_job(job):
+                copied += 1
+            else:
+                missing += 1
+        return copied, missing
+
+    copied = 0
+    missing = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_copy_video_job, job) for job in video_jobs]
+        for future in as_completed(futures):
+            if future.result():
+                copied += 1
+            else:
+                missing += 1
+
+    return copied, missing
 
 def split_batch(args: argparse.Namespace) -> dict[str, Any]:
     specs = _parse_specs(args.subtasks, args.task_preset)
@@ -884,23 +922,22 @@ def split_batch(args: argparse.Namespace) -> dict[str, Any]:
 
     source_roots = [Path(item) for item in args.source_root]
 
-    first_source_root = source_roots[0].expanduser().resolve()
-    if args.output_root:
-        output_root = Path(args.output_root).expanduser().resolve()
+    default_output_root = source_roots[0].expanduser().resolve()
+    if _is_lerobot_dataset(default_output_root):
+        default_output_root = default_output_root.parent / f"{default_output_root.name}_advantage_annotated"
     else:
-        if _is_lerobot_dataset(first_source_root):
-            output_root = first_source_root.parent / f"{first_source_root.name}_advantage_annotated"
-        else:
-            output_root = first_source_root / "advantage_annotated"
+        default_output_root = default_output_root / "advantage_annotated"
 
+    output_root = Path(args.output_root).expanduser().resolve() if args.output_root else default_output_root
     repo_prefix = _slug(args.repo_prefix or output_root.name or "advantage_annotated")
-    planned_output_names = {output_root.name}
 
+    planned_output_names = {output_root.name}
     sources = _load_sources(source_roots, planned_output_names)
     if not sources:
         raise ValueError("No source datasets selected")
 
     _, pq = _import_pyarrow()
+    video_keys_by_source = _video_keys_for_sources(sources, args)
 
     if output_root.exists():
         if not args.overwrite:
@@ -908,51 +945,37 @@ def split_batch(args: argparse.Namespace) -> dict[str, Any]:
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
+    base_info = dict(sources[0].info)
+    chunk_size = max(int(base_info.get("chunks_size") or 1000), 1)
+
+    features = dict(base_info.get("features") or {})
+    features["stage_progress_gt"] = {
+        "dtype": "float32",
+        "shape": [1],
+        "names": ["stage_progress_gt"],
+    }
+    base_info["features"] = features
+
+    output_episodes: list[dict[str, Any]] = []
+    output_stats: list[dict[str, Any]] = []
     failed_episodes: list[dict[str, Any]] = []
-    annotated_datasets: list[dict[str, Any]] = []
-    annotated_episodes = 0
-    annotated_frames = 0
+    write_items: list[tuple[SourceDataset, int, int, Any]] = []
+
+    total_frames = 0
+    videos_copied = 0
 
     for source in sources:
-        dataset_root = _annotated_dataset_root(source, output_root, len(sources))
-
-        if dataset_root.exists():
-            if not args.overwrite:
-                raise FileExistsError(f"{dataset_root} exists; pass --overwrite")
-            shutil.rmtree(dataset_root)
-
-        shutil.copytree(source.root, dataset_root)
-
-        output_info = _load_json(dataset_root / "meta" / "info.json")
-        output_episodes = _load_jsonl(dataset_root / "meta" / "episodes.jsonl")
-
-        features = dict(output_info.get("features") or {})
-        if "stage_progress_gt" not in features:
-            features["stage_progress_gt"] = {
-                "dtype": "float32",
-                "shape": [1],
-                "names": ["stage_progress_gt"],
-            }
-            output_info["features"] = features
-
-        dataset_annotated_episodes = 0
-        dataset_annotated_frames = 0
-        episode_annotations: dict[int, dict[str, Any]] = {}
-
         for episode in source.episodes:
-            episode_index = int(episode["episode_index"])
-            source_episode_path = _episode_path(source.root, source.info, episode_index)
-            output_episode_path = _episode_path(dataset_root, output_info, episode_index)
+            source_episode_index = int(episode["episode_index"])
+            source_episode_path = _episode_path(source.root, source.info, source_episode_index)
 
             try:
                 table = pq.read_table(source_episode_path)
-
-                # 不改现有边界查找逻辑，只复用它产出的 SegmentPlan。
                 plans = _episode_segments(source, episode, table, specs, args)
 
                 if len(plans) != len(specs):
                     raise RuntimeError(
-                        f"{source.root.name} episode={episode_index} produced {len(plans)} stages, "
+                        f"{source.root.name} episode={source_episode_index} produced {len(plans)} stages, "
                         f"expected {len(specs)}."
                     )
 
@@ -962,67 +985,106 @@ def split_batch(args: argparse.Namespace) -> dict[str, Any]:
                     stage_count=len(specs),
                 )
 
-                output_episode_path.parent.mkdir(parents=True, exist_ok=True)
-                pq.write_table(annotated_table, output_episode_path)
-                written_table = pq.read_table(output_episode_path)
-                if "stage_progress_gt" not in written_table.column_names:
-                    raise RuntimeError(f"stage_progress_gt not written: {output_episode_path}")
+                if "stage_progress_gt" not in annotated_table.column_names:
+                    raise RuntimeError(f"stage_progress_gt not generated: {source_episode_path}")
 
-
+                new_episode_index = len(output_episodes)
                 boundaries, stages = _episode_boundary_annotation(plans)
-                episode_annotations[episode_index] = {
-                    "subtask_boundary_frames": boundaries,
-                    "subtask_stage_segments": stages,
-                    "stage_progress_gt_formula": (
-                        "k/K + (1/K) * "
-                        "(frame_position_within_stage / segment_length)"
-                    ),
-                    "stage_progress_gt_column": "stage_progress_gt",
-                }
 
-                dataset_annotated_episodes += 1
-                dataset_annotated_frames += annotated_table.num_rows
-                annotated_episodes += 1
-                annotated_frames += annotated_table.num_rows
-
-            except Exception as exc:
-                if not args.skip_failed_episodes:
-                    raise
-                failed_episodes.append(
+                output_episode = dict(episode)
+                output_episode.update(
                     {
-                        "source_dataset": str(source.root),
-                        "episode_index": episode_index,
-                        "error": str(exc),
+                        "episode_index": new_episode_index,
+                        "source_dataset": source.source_id,
+                        "source_dataset_root": str(source.root),
+                        "source_episode_index": source_episode_index,
+                        "subtask_boundary_frames": boundaries,
+                        "subtask_stage_segments": stages,
+                        "stage_progress_gt_formula": (
+                            "k/K + (1/K) * "
+                            "(frame_position_within_stage / segment_length)"
+                        ),
+                        "stage_progress_gt_column": "stage_progress_gt",
+                        "length": annotated_table.num_rows,
                     }
                 )
 
-        annotated_output_episodes: list[dict[str, Any]] = []
-        for episode in output_episodes:
-            episode = dict(episode)
-            episode_index = int(episode["episode_index"])
-            annotation = episode_annotations.get(episode_index)
-            if annotation:
-                episode.update(annotation)
-            annotated_output_episodes.append(episode)
+                output_episodes.append(output_episode)
+                output_stats.append(
+                    {
+                        "episode_index": new_episode_index,
+                        "stats": _episode_stats(annotated_table, base_info),
+                    }
+                )
+                write_items.append((source, source_episode_index, new_episode_index, annotated_table))
+                total_frames += annotated_table.num_rows
 
-        output_info["stage_progress_gt"] = {
-            "column": "stage_progress_gt",
-            "formula": "k/K + (1/K) * (frame_position_within_stage / segment_length)",
-            "subtask_count": len(specs),
-            "subtasks": [{"label": spec.label, "prompt": spec.prompt} for spec in specs],
+            except Exception as exc:
+                failed_episodes.append(
+                    {
+                        "source_dataset": str(source.root),
+                        "episode_index": source_episode_index,
+                        "error": str(exc),
+                    }
+                )
+                continue
+
+    if not write_items:
+        raise RuntimeError("No episodes were annotated.")
+
+    (output_root / "meta").mkdir(parents=True, exist_ok=True)
+    
+    video_jobs: list[CopyVideoJob] = []
+    for source, source_episode_index, new_episode_index, annotated_table in write_items:
+        output_episode_path = _output_episode_path(output_root, new_episode_index, chunk_size)
+        output_episode_path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(annotated_table, output_episode_path)
+
+        written_table = pq.read_table(output_episode_path)
+        if "stage_progress_gt" not in written_table.column_names:
+            raise RuntimeError(f"stage_progress_gt not written: {output_episode_path}")
+
+        if args.split_videos:
+            for video_key in video_keys_by_source.get(source.root, []):
+                video_jobs.append(
+                    CopyVideoJob(
+                        source_video=_video_path(source.root, source.info, source_episode_index, video_key),
+                        output_video=_output_video_path(output_root, new_episode_index, video_key, chunk_size),
+                    )
+                )
+    
+    videos_copied = 0
+    videos_missing = 0
+    if args.split_videos:
+        videos_copied, videos_missing = _copy_videos(video_jobs, args)
+
+    base_info.update(
+        {
+            "total_episodes": len(output_episodes),
+            "total_frames": total_frames,
+            "total_chunks": int(math.ceil(len(output_episodes) / chunk_size)),
+            "splits": {"train": f"0:{len(output_episodes)}"},
+            "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+            "stage_progress_gt": {
+                "column": "stage_progress_gt",
+                "formula": "k/K + (1/K) * (frame_position_within_stage / segment_length)",
+                "subtask_count": len(specs),
+                "subtasks": [{"label": spec.label, "prompt": spec.prompt} for spec in specs],
+            },
         }
+    )
 
-        _write_json(dataset_root / "meta" / "info.json", output_info)
-        _write_jsonl(dataset_root / "meta" / "episodes.jsonl", annotated_output_episodes)
+    if args.split_videos:
+        base_info["total_videos"] = videos_copied
+        base_info["video_path"] = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
 
-        annotated_datasets.append(
-            {
-                "source_dataset_root": str(source.root),
-                "dataset_root": str(dataset_root),
-                "episodes": dataset_annotated_episodes,
-                "frames": dataset_annotated_frames,
-            }
-        )
+    _write_json(output_root / "meta" / "info.json", base_info)
+    _write_jsonl(output_root / "meta" / "episodes.jsonl", output_episodes)
+    _write_jsonl(output_root / "meta" / "episodes_stats.jsonl", output_stats)
+
+    source_tasks_path = sources[0].root / "meta" / "tasks.jsonl"
+    if source_tasks_path.exists():
+        shutil.copy2(source_tasks_path, output_root / "meta" / "tasks.jsonl")
 
     summary: dict[str, Any] = {
         "source_roots": [str(source.root) for source in sources],
@@ -1030,12 +1092,12 @@ def split_batch(args: argparse.Namespace) -> dict[str, Any]:
         "repo_prefix": repo_prefix,
         "task_preset": args.task_preset,
         "subtasks": [{"label": spec.label, "prompt": spec.prompt} for spec in specs],
-        "datasets": annotated_datasets,
-        "annotated_episodes": annotated_episodes,
-        "annotated_frames": annotated_frames,
+        "annotated_episodes": len(output_episodes),
+        "annotated_frames": total_frames,
         "failed_episodes": failed_episodes,
+        "videos_copied": videos_copied,
         "stage_progress_column": "stage_progress_gt",
-        "write_mode": "copy_dataset_then_annotate_output_parquet",
+        "write_mode": "single_output_dataset_with_successful_episodes",
     }
 
     _write_json(output_root / f"{repo_prefix}_stage_progress_annotation_summary.json", summary)
