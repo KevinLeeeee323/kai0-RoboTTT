@@ -1,5 +1,10 @@
 source .venv/bin/activate
-# export WANDB_MODE=${WANDB_MODE:-offline}
+export WANDB_MODE=disabled   # ${WANDB_MODE:-offline}
+
+TRANSFORMERS_DIR=$(uv run python -c "import transformers, os; print(os.path.dirname(transformers.__file__))")
+echo "Transformers dir: $TRANSFORMERS_DIR"
+cp -r ./src/openpi/models_pytorch/transformers_replace/* "$TRANSFORMERS_DIR"/
+
 RUNNAME=ADVANTAGE_TORCH_KAI0_FLATTEN_FOLD   # or ADVANTAGE_TORCH_PI06_FLATTEN_FOLD
 RUNTIME=run1
 mkdir -p "./experiment/${RUNNAME}/log"
