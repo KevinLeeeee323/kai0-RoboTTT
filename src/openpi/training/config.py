@@ -1532,7 +1532,7 @@ _CONFIGS = [
                 "solid_pick_funnel_to_reactor"
             ],
             root="/mnt/hdy/organ_data/organ_data_le/solid_atom_07/solid_atom/",
-            assets=AssetsConfig(asset_id="funnel2reactor_agilex_ma_2"),
+            assets=AssetsConfig(asset_id="funnel2reactor_agilex_ma_1"),
             repack_transforms=_transforms.Group(
                 inputs=[
                     _transforms.RepackTransform(
@@ -2582,24 +2582,27 @@ _CONFIGS = [
             discrete_state_input=False,
         ),
         data=LerobotAgilexDataConfig(
-            repo_id = "Path/to/your/advantage/dataset",
+            repo_id = "/mnt/hdy/organ_data/organ_data_le/liquid_annotation",
             assets=AssetsConfig(
                 assets_dir="/home/hdy/kai0/stage_advantage/assets",
                 asset_id="boil",
             ),
-            default_prompt="Pick up the funnel and put it back on the funnel rack, place the distillation rack, turn the reactor knob",
+            default_prompt="pour solution from the beaker into the graduated cylinder,pour solution from the graduated cylinder into the reactor",
             # * why removing "prompt" here will lead to an error in transforms.py
             repack_transforms=_transforms.Group(
                 inputs=[
                 _transforms.RepackTransform(
-                    {
+                    {  
                         "images": {
-                            "top_head": "observation.images.top_head",
-                            "hand_left": "observation.images.hand_left",
-                            "hand_right": "observation.images.hand_right",
-                            "his_-100_top_head": "his_-100_observation.images.top_head",
-                            "his_-100_hand_left": "his_-100_observation.images.hand_left",
-                            "his_-100_hand_right": "his_-100_observation.images.hand_right",
+                            "top_head": "observation.images.cam_high",
+                            "hand_left": "observation.images.cam_left_wrist",  #observation.images.cam_left_wrist
+                            "hand_right": "observation.images.cam_right_wrist",
+                            "his_-100_top_head": "his_-100_observation.images.cam_high",
+                            "his_-100_hand_left": "his_-100_observation.images.cam_left_wrist",
+                            "his_-100_hand_right": "his_-100_observation.images.cam_right_wrist",
+                            # "his_-100_top_head": "his_-100_observation.images.top_head",
+                            # "his_-100_hand_left": "his_-100_observation.images.hand_left",
+                            # "his_-100_hand_right": "his_-100_observation.images.hand_right",
                         },
                         "state": "observation.state",
                         "actions": "action",
@@ -2607,7 +2610,7 @@ _CONFIGS = [
                         "episode_length": "episode_length",
                         "frame_index": "frame_index",
                         "episode_index": "episode_index",
-                        "progress_gt": "progress_gt",
+                        # "progress_gt": "progress_gt",
                         "stage_progress_gt": "stage_progress_gt",
                         "progress": "progress",
                         # "is_suboptimal": "is_suboptimal",
@@ -2616,7 +2619,8 @@ _CONFIGS = [
             ]
             )
         ),
-        pytorch_weight_path="/mnt/hdy/kai0-main/weights_cache/openpi-assets/checkpoints/pi05_base/params",
+        pytorch_weight_path="/mnt/hdy/kai0/weights_cache/pi05_base",
+        # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=100_000,
         keep_period=10000,
         save_interval=10000,

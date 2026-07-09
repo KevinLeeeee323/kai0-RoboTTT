@@ -89,8 +89,8 @@
 
 echo "==================== Start Training ===================="
 
-NAME="funnel2reactor_agilex_ma_1"
-ASSET_ID="funnel2reactor_agilex_ma_1"
+NAME="funnel2reactor_agilex"
+ASSET_ID="funnel2reactor_agilex"
 CKPT_STEP="30000"
 SSH_PORT="2222"
 
@@ -105,17 +105,17 @@ source .venv/bin/activate
 
 echo "==================== Task: ${NAME} ===================="
 
-# 配置 config 文件
-python scripts/compute_norm_states_fast.py --config-name "$NAME"
+# # 配置 config 文件
+# python scripts/compute_norm_states_fast.py --config-name "$NAME"
 
-# 训练
-LD_LIBRARY_PATH="${LOCAL_PROJECT}/ffmpeg_libs:${LD_LIBRARY_PATH:-}" \
-python scripts/train.py "$NAME" \
-  --exp_name="$NAME" \
-  --batch-size=16 \
-  --num_train_steps=31000 \
-  --num_workers=2 \
-  --overwrite
+# # 训练
+# LD_LIBRARY_PATH="${LOCAL_PROJECT}/ffmpeg_libs:${LD_LIBRARY_PATH:-}" \
+# python scripts/train.py "$NAME" \
+#   --exp_name="$NAME" \
+#   --batch-size=16 \
+#   --num_train_steps=31000 \
+#   --num_workers=2 \
+#   --overwrite
 
 # # 导出 expert 参数
 # python scripts/pi05_action_expert_checkpoint.py export \
@@ -134,20 +134,19 @@ python scripts/train.py "$NAME" \
 
 # 传 expert 参数
 # 前提：ssh -N -T -R 2222:10.132.91.10:22 lin 已经建立
-# ssh -p "$SSH_PORT" hdy@127.0.0.1 "mkdir -p ${REMOTE_CKPT_DIR}"
+ssh -p "$SSH_PORT" hdy@127.0.0.1 "mkdir -p ${REMOTE_CKPT_DIR}"
 
-# rsync -avzP \
-#   --exclude="train_state" \
-#   -e "ssh -p ${SSH_PORT}" \
-#   "${LOCAL_CKPT_DIR}/${ASSET_ID}_expert" \
-#   hdy@127.0.0.1:"${REMOTE_CKPT_DIR}/"
+rsync -avzP \
+  --exclude="train_state" \
+  -e "ssh -p ${SSH_PORT}" \
+  "${LOCAL_CKPT_DIR}/${ASSET_ID}_expert" \
+  hdy@127.0.0.1:"${REMOTE_CKPT_DIR}/"
 
-# # 在远端 merge
-# ssh -p "$SSH_PORT" hdy@127.0.0.1 "cd ${REMOTE_PROJECT} && source active_py.sh && source .venv/bin/activate && uv run python scripts/pi05_action_expert_checkpoint.py merge \
-#   --base-params /home/hdy/.cache/openpi/openpi-assets/checkpoints/pi05_base/params \
-#   --expert-params ${REMOTE_CKPT_DIR}/${ASSET_ID}_expert/params_expert \
-#   --output ${REMOTE_CKPT_DIR}/${ASSET_ID}_expert/params \
-#   --overwrite"
+# 在远端 merge
+ssh -p "$SSH_PORT" hdy@127.0.0.1 "cd ${REMOTE_PROJECT} && source active_py.sh && source .venv/bin/activate && python scripts/pi05_action_expert_checkpoint.py merge \
+  --base-params /home/hdy/.cache/openpi/openpi-assets/checkpoints/pi05_base/params \
+  --expert-params ${REMOTE_CKPT_DIR}/${ASSET_ID}_expert/params_expert \
+  --output ${REMOTE_CKPT_DIR}/${ASSET_ID}_expert/params \
+  --overwrite"
 
-# echo "==================== Finished ===================="
-—
+echo "==================== Finished ===================="

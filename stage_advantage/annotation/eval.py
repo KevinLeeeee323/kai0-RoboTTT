@@ -56,8 +56,9 @@ MODELS_CONFIG_MAP = {
         'KAI0': {
             'name': 'KAI0',
             'config_name': 'ADVANTAGE_TORCH_KAI0_FLATTEN_FOLD',
-            'ckpt_dir': 'experiment/ADVANTAGE_TORCH_KAI0_FLATTEN_FOLD/run1',
-            'ckpt_steps': 100000
+            # 'ckpt_dir': 'experiment/ADVANTAGE_TORCH_KAI0_FLATTEN_FOLD/run1',
+            'ckpt_dir': '/mnt/hdy/kai0/checkpoints/ADVANTAGE_TORCH_KAI0_FLATTEN_FOLD/run1',
+            'ckpt_steps': 15000
         },
     },
     'demo_A': {
@@ -167,14 +168,17 @@ def main():
                 continue
 
             # Resolve video paths for all three camera views
+            #             cam_high", top_head
+            # cam_left_wrist",     hand_left
+            # .cam_right_wrist"    hand_right
             top_video = repo_id / dataset_metadata.video_path.format(
-                episode_chunk=i // dataset_metadata.chunks_size, episode_index=i, video_key='top_head'
+                episode_chunk=i // dataset_metadata.chunks_size, episode_index=i, video_key='cam_high'
             )
             left_video = repo_id / dataset_metadata.video_path.format(
-                episode_chunk=i // dataset_metadata.chunks_size, episode_index=i, video_key='hand_left'
+                episode_chunk=i // dataset_metadata.chunks_size, episode_index=i, video_key='cam_left_wrist'
             )
             right_video = repo_id / dataset_metadata.video_path.format(
-                episode_chunk=i // dataset_metadata.chunks_size, episode_index=i, video_key='hand_right'
+                episode_chunk=i // dataset_metadata.chunks_size, episode_index=i, video_key='cam_right_wrist'
             )
             if not top_video.exists() or not left_video.exists() or not right_video.exists():
                 print(f"Missing video file(s) for episode {i}, skipping")

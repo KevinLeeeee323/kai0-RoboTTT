@@ -10,7 +10,7 @@ RUNTIME=run1
 mkdir -p "./experiment/${RUNNAME}/log"
 
 # Single-GPU
-uv run python scripts/train_pytorch.py ${RUNNAME} --exp_name=${RUNTIME} --save_interval 10000 \
+uv run python scripts/train_pytorch.py ${RUNNAME} --exp_name=${RUNTIME} --save_interval 5000  --num_train_steps 15000 \
     2>&1 | tee "./experiment/${RUNNAME}/log/${RUNTIME}.log"
 
 # # Multi-GPU (e.g. 8 GPUs)
