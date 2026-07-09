@@ -91,6 +91,42 @@ MODELS_CONFIG_MAP = {
     },
 }
 
+VIDEO_KEY_CANDIDATES = {
+    "top": (
+        "observation.images.top_head",
+        "top_head",
+        "observation.images.cam_high",
+        "cam_high",
+    ),
+    "left": (
+        "observation.images.hand_left",
+        "hand_left",
+        "observation.images.cam_left_wrist",
+        "cam_left_wrist",
+    ),
+    "right": (
+        "observation.images.hand_right",
+        "hand_right",
+        "observation.images.cam_right_wrist",
+        "cam_right_wrist",
+    ),
+}
+
+
+def _resolve_video_path(repo_id: Path, dataset_metadata, episode_index: int, camera: str) -> tuple[Path | None, list[Path]]:
+    """Resolve one logical camera to an existing LeRobot video path."""
+    attempted_paths = []
+    for video_key in VIDEO_KEY_CANDIDATES[camera]:
+        video_path = repo_id / dataset_metadata.video_path.format(
+            episode_chunk=episode_index // dataset_metadata.chunks_size,
+            episode_index=episode_index,
+            video_key=video_key,
+        )
+        attempted_paths.append(video_path)
+        if video_path.exists():
+            return video_path, attempted_paths
+    return None, attempted_paths
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -158,6 +194,7 @@ def main():
         )
 
         dataset_metadata = lerobot_dataset.LeRobotDatasetMetadata(repo_id=repo_id)
+        missing_video_episodes = 0
 
         for i in tqdm(range(dataset_metadata.total_episodes), desc="Evaluating episodes"):
             parquet_file = repo_id / dataset_metadata.data_path.format(
@@ -167,21 +204,20 @@ def main():
                 print(f"Parquet file {parquet_file} not found, skipping")
                 continue
 
-            # Resolve video paths for all three camera views
-            #             cam_high", top_head
-            # cam_left_wrist",     hand_left
-            # .cam_right_wrist"    hand_right
-            top_video = repo_id / dataset_metadata.video_path.format(
-                episode_chunk=i // dataset_metadata.chunks_size, episode_index=i, video_key='cam_high'
-            )
-            left_video = repo_id / dataset_metadata.video_path.format(
-                episode_chunk=i // dataset_metadata.chunks_size, episode_index=i, video_key='cam_left_wrist'
-            )
-            right_video = repo_id / dataset_metadata.video_path.format(
-                episode_chunk=i // dataset_metadata.chunks_size, episode_index=i, video_key='cam_right_wrist'
-            )
-            if not top_video.exists() or not left_video.exists() or not right_video.exists():
-                print(f"Missing video file(s) for episode {i}, skipping")
+            # Resolve video paths for all three camera views. LeRobot datasets may
+            # store full feature names (observation.images.*) or short camera keys.
+            top_video, top_attempts = _resolve_video_path(repo_id, dataset_metadata, i, "top")
+            left_video, left_attempts = _resolve_video_path(repo_id, dataset_metadata, i, "left")
+            right_video, right_attempts = _resolve_video_path(repo_id, dataset_metadata, i, "right")
+            if top_video is None or left_video is None or right_video is None:
+                if missing_video_episodes < 5:
+                    print(
+                        f"Missing video file(s) for episode {i}, skipping. Tried:\n"
+                        f"  top: {[str(path) for path in top_attempts]}\n"
+                        f"  left: {[str(path) for path in left_attempts]}\n"
+                        f"  right: {[str(path) for path in right_attempts]}"
+                    )
+                missing_video_episodes += 1
                 continue
 
             video_paths = (top_video, left_video, right_video)
@@ -226,6 +262,9 @@ def main():
                 output_path=output_path,
                 advantages_dict=results,
             )
+
+        if missing_video_episodes:
+            print(f"Skipped {missing_video_episodes} episode(s) because required videos were missing.")
 
 
 if __name__ == "__main__":
