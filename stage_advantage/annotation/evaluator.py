@@ -95,6 +95,29 @@ class SimpleValueEvaluator:
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
 
+        pyav_error = None
+        try:
+            frames = self._load_video_frames_pyav(video_path, frame_interval)
+            if frames:
+                return frames
+        except Exception as exc:
+            pyav_error = exc
+            logging.warning("PyAV failed to decode %s; retrying with OpenCV: %s", video_path, exc)
+
+        if pyav_error is None:
+            logging.warning(
+                "PyAV decoded 0 frames from %s; retrying with OpenCV decoding",
+                video_path,
+            )
+        frames = self._load_video_frames_opencv(video_path, frame_interval)
+        if not frames:
+            if pyav_error is not None:
+                raise ValueError(f"Decoded 0 frames from video file: {video_path}") from pyav_error
+            raise ValueError(f"Decoded 0 frames from video file: {video_path}")
+        return frames
+
+    def _load_video_frames_opencv(self, video_path: str, frame_interval: int) -> List[np.ndarray]:
+        """Load RGB frames with OpenCV."""
         cap = cv2.VideoCapture(video_path)
         frames = []
         frame_count = 0
@@ -114,6 +137,30 @@ class SimpleValueEvaluator:
 
         logging.info(
             f"Loaded {len(frames)} frames from {os.path.basename(video_path)} "
+            f"(total: {frame_count}, interval: {frame_interval})"
+        )
+        return frames
+
+    def _load_video_frames_pyav(self, video_path: str, frame_interval: int) -> List[np.ndarray]:
+        """Load RGB frames with PyAV software decoding."""
+        try:
+            import av
+        except ImportError as exc:
+            raise ImportError("PyAV is required to decode videos that OpenCV cannot read") from exc
+
+        frames = []
+        frame_count = 0
+        try:
+            with av.open(video_path) as container:
+                for frame in container.decode(video=0):
+                    if frame_count % frame_interval == 0:
+                        frames.append(frame.to_ndarray(format="rgb24"))
+                    frame_count += 1
+        except Exception as exc:
+            raise RuntimeError(f"PyAV failed to decode video file: {video_path}") from exc
+
+        logging.info(
+            f"Loaded {len(frames)} frames from {os.path.basename(video_path)} with PyAV "
             f"(total: {frame_count}, interval: {frame_interval})"
         )
         return frames
