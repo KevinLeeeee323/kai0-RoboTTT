@@ -401,6 +401,79 @@ function featureDimNames(key) {
   return Array.from({ length: width }, (_, index) => names[index] || `dim ${index}`);
 }
 
+function formatChartNumber(value) {
+  if (!Number.isFinite(value)) return "-";
+  const abs = Math.abs(value);
+  if (abs > 0 && (abs < 0.001 || abs >= 10000)) return value.toExponential(2);
+  return value.toFixed(abs >= 100 ? 1 : 3).replace(/\.?0+$/, "");
+}
+
+function chartPlotArea(width, height) {
+  return {
+    left: 54,
+    right: width - 16,
+    top: 30,
+    bottom: height - 34,
+  };
+}
+
+function drawChartAxes(ctx, width, height, min, max, xCount) {
+  const area = chartPlotArea(width, height);
+  const span = Math.max(max - min, 1e-6);
+  const xScale = (index, length = xCount) => area.left + (index / Math.max(length - 1, 1)) * (area.right - area.left);
+  const yScale = (value) => area.bottom - ((value - min) / span) * (area.bottom - area.top);
+
+  ctx.save();
+  ctx.font = "11px ui-monospace, SFMono-Regular, Consolas, monospace";
+  ctx.textBaseline = "middle";
+
+  const yTicks = 5;
+  for (let i = 0; i < yTicks; i += 1) {
+    const tickRatio = i / Math.max(yTicks - 1, 1);
+    const value = min + span * tickRatio;
+    const py = yScale(value);
+    ctx.strokeStyle = "rgba(102, 115, 111, 0.14)";
+    ctx.beginPath();
+    ctx.moveTo(area.left, py);
+    ctx.lineTo(area.right, py);
+    ctx.stroke();
+    ctx.fillStyle = "#66736f";
+    ctx.textAlign = "right";
+    ctx.fillText(formatChartNumber(value), area.left - 8, py);
+  }
+
+  const xTicks = Array.from(new Set([0, 0.25, 0.5, 0.75, 1].map((tickRatio) => Math.round(tickRatio * Math.max(xCount - 1, 0)))));
+  ctx.textBaseline = "top";
+  xTicks.forEach((index) => {
+    const px = xScale(index);
+    ctx.strokeStyle = "rgba(102, 115, 111, 0.12)";
+    ctx.beginPath();
+    ctx.moveTo(px, area.top);
+    ctx.lineTo(px, area.bottom);
+    ctx.stroke();
+    ctx.fillStyle = "#66736f";
+    ctx.textAlign = "center";
+    ctx.fillText(String(index), px, area.bottom + 8);
+  });
+
+  ctx.strokeStyle = "#9ca8a4";
+  ctx.beginPath();
+  ctx.moveTo(area.left, area.top);
+  ctx.lineTo(area.left, area.bottom);
+  ctx.lineTo(area.right, area.bottom);
+  ctx.stroke();
+
+  ctx.fillStyle = "#66736f";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "bottom";
+  ctx.fillText("value", area.left - 8, area.top - 3);
+  ctx.textBaseline = "top";
+  ctx.fillText("row", area.right, area.bottom + 20);
+  ctx.restore();
+
+  return { area, xScale, yScale };
+}
+
 function drawFeatureCanvas() {
   const canvas = $("#featureCanvas");
   const ctx = canvas.getContext("2d");
@@ -436,18 +509,8 @@ function drawFeatureCanvas() {
   }
   const min = Math.min(...finite);
   const max = Math.max(...finite);
-  const span = Math.max(max - min, 1e-6);
-  const pad = 24;
-  const x = (index) => pad + (index / Math.max(rows.length - 1, 1)) * (width - pad * 2);
-  const y = (value) => height - pad - ((value - min) / span) * (height - pad * 2);
+  const { area, xScale: x, yScale: y } = drawChartAxes(ctx, width, height, min, max, rows.length);
   const colors = ["#0f766e", "#2563eb", "#dc2626", "#7c3aed", "#b45309", "#0891b2", "#475569", "#be185d", "#16a34a", "#4f46e5", "#ea580c", "#64748b", "#0e7490", "#9333ea"];
-
-  ctx.strokeStyle = "#dbe4e1";
-  ctx.beginPath();
-  ctx.moveTo(pad, pad);
-  ctx.lineTo(pad, height - pad);
-  ctx.lineTo(width - pad, height - pad);
-  ctx.stroke();
 
   for (let dim = 0; dim < dims; dim += 1) {
     ctx.strokeStyle = colors[dim % colors.length];
@@ -466,14 +529,18 @@ function drawFeatureCanvas() {
 
   ctx.strokeStyle = "#17211f";
   ctx.lineWidth = 1;
-  const cursorX = x(currentRow);
+  const cursor = Math.min(Math.max(currentRow, 0), rows.length - 1);
+  const cursorX = x(cursor);
   ctx.beginPath();
-  ctx.moveTo(cursorX, pad);
-  ctx.lineTo(cursorX, height - pad);
+  ctx.moveTo(cursorX, area.top);
+  ctx.lineTo(cursorX, area.bottom);
   ctx.stroke();
 
   const names = featureDimNames(currentFeature).slice(0, dims);
-  $("#featureStatus").textContent = `${currentFeature} · ${rows.length} rows · ${dims} dims · ${names.map((name, index) => `${index}:${name}`).join("  ")}`;
+  const cursorValues = names
+    .map((name, index) => `${name}=${formatChartNumber(Number(rows[cursor]?.[index]))}`)
+    .join("  ");
+  $("#featureStatus").textContent = `${currentFeature} | row ${cursor}/${rows.length - 1} | ${cursorValues}`;
 }
 
 function replayAvailable(series = currentSeries) {
@@ -754,26 +821,16 @@ function drawLineChart(canvas, seriesList, cursorIndex = 0, message = "No data",
   }
   const min = Math.min(...values);
   const max = Math.max(...values);
-  const span = Math.max(max - min, 1e-6);
-  const pad = 26;
   const longest = Math.max(...seriesList.map((item) => item.values.length), 1);
-  const x = (index, length = longest) => pad + (index / Math.max(length - 1, 1)) * (width - pad * 2);
-  const y = (value) => height - pad - ((value - min) / span) * (height - pad * 2);
-
-  ctx.strokeStyle = "#dbe4e1";
-  ctx.beginPath();
-  ctx.moveTo(pad, pad);
-  ctx.lineTo(pad, height - pad);
-  ctx.lineTo(width - pad, height - pad);
-  ctx.stroke();
+  const { area, xScale: x, yScale: y } = drawChartAxes(ctx, width, height, min, max, longest);
 
   ctx.strokeStyle = "rgba(23, 33, 31, 0.18)";
   ctx.lineWidth = 1;
   markers.forEach((marker) => {
     const markerX = x(Math.min(Math.max(marker, 0), longest - 1));
     ctx.beginPath();
-    ctx.moveTo(markerX, pad);
-    ctx.lineTo(markerX, height - pad);
+    ctx.moveTo(markerX, area.top);
+    ctx.lineTo(markerX, area.bottom);
     ctx.stroke();
   });
 
@@ -793,19 +850,22 @@ function drawLineChart(canvas, seriesList, cursorIndex = 0, message = "No data",
   });
   ctx.setLineDash([]);
   ctx.strokeStyle = "#17211f";
-  const cursorX = x(Math.min(cursorIndex, longest - 1));
+  const cursor = Math.min(Math.max(cursorIndex, 0), longest - 1);
+  const cursorX = x(cursor);
   ctx.beginPath();
-  ctx.moveTo(cursorX, pad);
-  ctx.lineTo(cursorX, height - pad);
+  ctx.moveTo(cursorX, area.top);
+  ctx.lineTo(cursorX, area.bottom);
   ctx.stroke();
 
-  let labelX = pad + 4;
+  let labelX = area.left + 4;
   seriesList.forEach((item) => {
+    const value = item.values[cursor];
+    const label = `${item.label} @ ${cursor}=${formatChartNumber(Number(value))}`;
     ctx.fillStyle = item.color;
     ctx.fillRect(labelX, 10, 14, 3);
     ctx.fillStyle = "#17211f";
-    ctx.fillText(item.label, labelX + 18, 14);
-    labelX += Math.min(180, 28 + item.label.length * 7);
+    ctx.fillText(label, labelX + 18, 14);
+    labelX += Math.min(240, 28 + label.length * 7);
   });
 }
 
