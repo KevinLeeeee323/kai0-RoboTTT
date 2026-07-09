@@ -34,7 +34,12 @@ _jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
 _dataset_roots: dict[str, Path] = {}
 _dataset_roots_lock = threading.Lock()
-EXTRA_VIEWER_NUMERIC_KEYS = {"stage_progress_gt"}
+EXTRA_VIEWER_NUMERIC_KEYS = {
+    "absolute_advantage",
+    "absolute_value",
+    "relative_advantage",
+    "stage_progress_gt",
+}
 
 
 def load_json(path: Path, default: Any) -> Any:
