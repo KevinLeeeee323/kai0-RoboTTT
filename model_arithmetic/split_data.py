@@ -18,10 +18,15 @@ from tqdm import tqdm
 
 # Video keys expected in LeRobot dataset layout
 VIDEO_KEYS = [
-    "observation.images.hand_left",
-    "observation.images.hand_right",
-    "observation.images.top_head",
+    "observation.images.cam_high",
+    "observation.images.cam_left_wrist",
+    "observation.images.cam_right_wrist",
 ]
+# VIDEO_KEYS = [
+#     "observation.images.hand_left",
+#     "observation.images.hand_right",
+#     "observation.images.top_head",
+# ]
 
 
 def split_lerobot_data(

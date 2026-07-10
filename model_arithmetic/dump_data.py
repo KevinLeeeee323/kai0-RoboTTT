@@ -35,6 +35,7 @@ def main():
     )
     samples_list = []
     for i, samples in enumerate(tqdm(data_loader)):
+        print(i)
         if i >= 50:
             break
         samples_list.append(samples)
