@@ -189,6 +189,7 @@ Episode indices are independent for inference vs DAgger. Set `--dataset_name` to
 | `find_all_can_port.sh` | List CAN interfaces and USB bus-info (run after plugging in USB-CAN adapters). |
 | `can_activate.sh` | Activate a single CAN interface by name, bitrate, and optional USB bus-info. |
 | `activate_can_arms.sh` | Activate all four CAN interfaces (edit bus-info before use). |
+| `activate_can_arms_legacy_names.sh` | Activate the same four CAN interfaces with old ALOHA names (`can_left`, `can_right`, `can_left_master`, `can_right_master`) for older collection launches. |
 | `agilex_openpi_dagger_collect.py` | Main DAGGER script: inference + DAgger mode and episode saving. |
 | `collect_data_1010.py` | Helper module used by the collector (`save_data`, `create_video_from_images`, `CollectOperator`). |
 
