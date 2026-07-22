@@ -203,11 +203,41 @@ No standalone `start_demo_*.py` is provided; use the steps above and set `PKG_RO
 | Script | Description |
 |--------|-------------|
 | `inference/agilex_inference_openpi_temporal_smoothing.py` | Temporal smoothing; prompt set via `lang_embeddings`. |
+| `inference/agilex_inference_openpi_temporal_smoothing_harness.py` | Temporal smoothing with harness episode traces, VLA input images, executed actions, optional videos, and run summaries. |
 | `inference/agilex_inference_openpi_temporal_ensembling.py` | Supports `--smooth_method naive_async` or `temporal_ensembling` [\[2\]](#references); prompt via `lang_embeddings`. |
 | `inference/agilex_inference_openpi_sync.py` | Synchronous inference. |
 | `inference/agilex_inference_openpi_rtc.py` | **RTC (real-time chunking):** uses `prev_action_chunk` and delay for chunk alignment [\[1\]](#references); includes temporal smoothing over chunk boundaries. **Server must be started with an RTC config** — see [RTC mode](#rtc-real-time-chunking-mode) above. Run with `--rtc_mode`. |
 
 Set **`--host`** to the **GPU host IP** (where `serve_policy` is running) and **`--port`** to the server port (default 8000). Ensure the prompt in the script matches training (and, for AWBC, use the positive-advantage format as in [stage_advantage](../../../stage_advantage/README.md)).
+
+### Temporal smoothing with harness recording
+
+Run the harness entry point from `train_deploy_alignment/inference/agilex`:
+
+```bash
+python inference/agilex_inference_openpi_temporal_smoothing_harness.py \
+  --host <gpu_host_ip> \
+  --port 8000 \
+  --ctrl_type joint \
+  --chunk_size 50 \
+  --harness_output_root ./harness_runs \
+  --harness_task_id fold_sleeve \
+  --harness_episode_id 0 \
+  --harness_prompt "fold the sleeve" \
+  --harness_policy_path <checkpoint_dir>
+```
+
+The script automatically enables temporal smoothing. Each invocation creates a unique timestamped run directory containing `task*/ep*/episode_metadata.json`, `vla_input_trace.jsonl`, `trajectory.jsonl`, stage/goal events, keyframes, `episode_result.json`, `summary.json`, `aggregate.json`, and TSV summaries.
+
+Useful optional flags:
+
+- `--harness_record_video`: record all three cameras as MP4. This adds IPC CPU and disk load, so it is disabled by default.
+- `--harness_trajectory_interval 5`: write one numerical trajectory record every five published commands.
+- `--harness_result success|failure|unknown`: supply an externally verified final label. The default `unknown` remains explicitly unlabelled and is never treated as success.
+- `--harness_completed_stage <name>`: add a verified completed stage; repeat the option for multiple stages.
+- `--harness_manual_annotations`: after the robot starts moving, accept live `stage <name>`, `goal`, and `failure` commands from the terminal. Live events retain their actual control step and keyframes.
+
+Use a new `--harness_run_id` or episode id when repeating an evaluation. The recorder refuses to append to a non-empty episode directory, preventing duplicated JSONL records.
 
 ---
 
