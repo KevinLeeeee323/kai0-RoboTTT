@@ -476,3 +476,12 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+# uv run python robodata_studio/evaluate_lerobot_policy_actions.py   --dataset_root /data/organ_data_le/solid   --repo_id measure_solid_0701   \
+# --episode 50  \
+# --host 127.0.0.1   \
+# --port 8000   \
+# --start 0   --count 20   --stride 10   --horizon 50   \
+# --model_color_order rgb

@@ -238,7 +238,7 @@ class Pi0(_model.BaseModel):
         rng: at.KeyArrayLike,
         observation: _model.Observation,
         *,
-        num_steps: int | at.Int[at.Array, ""] = 10,
+        num_steps: int | at.Int[at.Array, ""] = 1,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
