@@ -2894,6 +2894,22 @@ _CONFIGS = [
         batch_size=256,
     ),
     TrainConfig(
+        name="pi05_flatten_fold_ttt",
+        model=pi0_config.Pi0TTTConfig(),
+        data=LerobotAgilexDataConfig(
+            repo_id="<path_to_repo_root>/data/FlattenFold/base",
+            assets=AssetsConfig(asset_id="flatten_fold"),
+            default_prompt="Flatten and fold the cloth.",
+            use_delta_joint_actions=False,
+        ),
+        weight_loader=weight_loaders.TTTCheckpointWeightLoader("<path/to/pi05_base/checkpoint>/params"),
+        freeze_filter=pi0_config.Pi0TTTConfig().get_freeze_filter(),
+        lr_schedule=_optimizer.CosineDecaySchedule(peak_lr=2e-5),
+        ema_decay=None,
+        batch_size=1,
+        num_workers=2,
+    ),
+    TrainConfig(
         name="pi05_tee_shirt_sort_normal",
         model=pi0_config.Pi0Config(pi05=True),
         data = LerobotAgilexDataConfig(

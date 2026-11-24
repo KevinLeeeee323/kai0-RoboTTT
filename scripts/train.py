@@ -16,7 +16,7 @@ import optax
 import tqdm_loggable.auto as tqdm
 import wandb
 
-
+from openpi.models import pi0_config
 import openpi.models.model as _model
 import openpi.shared.array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
@@ -28,7 +28,6 @@ import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
 import openpi.transforms as _transforms
-
 
 print("device_count", jax.device_count())
 print("devices", jax.devices())
@@ -139,6 +138,45 @@ def init_train_state(
     return train_state, state_sharding
 
 
+def _ttt_loss_and_grad(config, model, rng, batch):
+    """Backpropagate one segment at a time and update slow weights once per window."""
+    graphdef, trainable, frozen = nnx.split(model, config.trainable_filter, ...)
+    length = batch[1].shape[1]
+    segment_length = min(length, config.model.tbptt_segment_length)
+
+    def segment_loss(params, segment, segment_rng, fast_state):
+        model = nnx.merge(graphdef, params, frozen)
+        loss, fast_state = model.compute_ttt_segment_loss(segment_rng, *segment, fast_state, train=True)
+        return jnp.mean(loss, axis=(0, 2)).sum(), jax.tree.map(jax.lax.stop_gradient, fast_state)
+
+    loss_and_grad = jax.value_and_grad(segment_loss, has_aux=True)
+    first = jax.tree.map(lambda x: x[:, :segment_length], batch)
+    (loss, fast_state), grads = loss_and_grad(trainable, first, jax.random.fold_in(rng, 0), None)
+
+    def accumulate(carry, segment, index):
+        loss, grads, fast_state = carry
+        (segment_loss, fast_state), segment_grads = loss_and_grad(
+            trainable, segment, jax.random.fold_in(rng, index), fast_state
+        )
+        return loss + segment_loss, jax.tree.map(jnp.add, grads, segment_grads), fast_state
+
+    def full_segment(carry, index):
+        segment = jax.tree.map(
+            lambda x: jax.lax.dynamic_slice_in_dim(x, index * segment_length, segment_length, axis=1), batch
+        )
+        return accumulate(carry, segment, index), None
+
+    num_full_segments, remainder = divmod(length, segment_length)
+    carry = (loss, grads, fast_state)
+    if num_full_segments > 1:
+        carry, _ = jax.lax.scan(full_segment, carry, jnp.arange(1, num_full_segments))
+    if remainder:
+        tail = jax.tree.map(lambda x: x[:, -remainder:], batch)
+        carry = accumulate(carry, tail, num_full_segments)
+    loss, grads, _ = carry
+    return loss / length, jax.tree.map(lambda grad: grad / length, grads)
+
+
 @at.typecheck
 def train_step(
     config: _config.TrainConfig,
@@ -159,9 +197,11 @@ def train_step(
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
 
-    # Filter out frozen params.
-    diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    if isinstance(config.model, pi0_config.Pi0TTTConfig):
+        loss, grads = _ttt_loss_and_grad(config, model, train_rng, batch)
+    else:
+        diff_state = nnx.DiffState(0, config.trainable_filter)
+        loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
 
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -207,6 +247,20 @@ def heldout_eval_step(
     model = nnx.merge(state.model_def, state.params)
     model.eval()
     observation, _ = batch
+    if isinstance(config.model, pi0_config.Pi0TTTConfig):
+
+        def sample(fast_state, inputs):
+            obs, step_rng = inputs
+            actions, fast_state = model.sample_actions_with_state(
+                step_rng, obs, fast_state=fast_state, num_steps=config.heldout_eval_num_steps
+            )
+            return fast_state, actions
+
+        observations = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), observation)
+        length = observations.state.shape[0]
+        initial_state = model.ttt.initial_state(observation.state.shape[0])
+        _, actions = jax.lax.scan(sample, initial_state, (observations, jax.random.split(rng, length)))
+        return actions[-1]
     return model.sample_actions(rng, observation, num_steps=config.heldout_eval_num_steps)
 
 
@@ -289,6 +343,8 @@ def log_heldout_eval(
     pred_actions: np.ndarray,
 ) -> dict[str, float]:
     observation, true_actions_raw = eval_batch
+    if isinstance(config.model, pi0_config.Pi0TTTConfig):
+        observation, true_actions_raw = jax.tree.map(lambda x: x[:, -1], (observation, true_actions_raw))
     true_actions = _decode_eval_actions(output_transform, observation, _to_host_array(true_actions_raw))
     pred_actions = _decode_eval_actions(output_transform, observation, pred_actions)
 
@@ -372,9 +428,12 @@ def main(config: _config.TrainConfig):
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
     # Log images from first batch to sanity check.
+    images = batch[0].images
+    if isinstance(config.model, pi0_config.Pi0TTTConfig):
+        images = {name: image[:, 0] for name, image in images.items()}
     images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
+        wandb.Image(np.concatenate([np.array(img[i]) for img in images.values()], axis=1))
+        for i in range(min(5, len(next(iter(images.values())))))
     ]
     wandb.log({"camera_views": images_to_log}, step=0)
 

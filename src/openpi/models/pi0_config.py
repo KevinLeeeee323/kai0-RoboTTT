@@ -13,6 +13,7 @@ import openpi.shared.nnx_utils as nnx_utils
 
 if TYPE_CHECKING:
     from openpi.models.pi0 import Pi0
+    from openpi.models.pi0 import Pi0TTT
     from openpi.models.pi0_rtc import Pi0RTC
 
 
@@ -129,6 +130,41 @@ class Pi0Config(_model.BaseModelConfig):
         if not filters:
             return nnx.Nothing
         return nnx.All(*filters)
+
+
+@dataclasses.dataclass(frozen=True)
+class Pi0TTTConfig(Pi0Config):
+    pi05: bool = True
+    ttt_layers: int = 4
+    ttt_hidden_dim: int = 4096
+    sequence_length: int = 128
+    sequence_stride: int = 32
+    observation_stride: int = 1
+    tbptt_segment_length: int = 8
+
+    def __post_init__(self):
+        super().__post_init__()
+        expert = _gemma.get_config(self.action_expert_variant)
+        if not 1 <= self.ttt_layers <= expert.depth:
+            raise ValueError(f"ttt_layers must be between 1 and {expert.depth}.")
+        if min(self.ttt_hidden_dim, self.sequence_length, self.sequence_stride, self.observation_stride) < 1:
+            raise ValueError("TTT hidden dimension, sequence length and strides must be positive.")
+        if not 1 <= self.tbptt_segment_length <= self.sequence_length:
+            raise ValueError("tbptt_segment_length must be positive and no longer than sequence_length.")
+
+    @override
+    def create(self, rng: at.KeyArrayLike) -> "Pi0TTT":
+        from openpi.models.pi0 import Pi0TTT
+
+        return Pi0TTT(self, rngs=nnx.Rngs(rng))
+
+    @override
+    def get_freeze_filter(self) -> nnx.filterlib.Filter:
+        return nnx.Not(nnx_utils.PathRegex(r"ttt/.*"))
+
+    @override
+    def load_pytorch(self, train_config, weight_path: str):
+        raise ValueError("Pi0TTTConfig requires a JAX checkpoint.")
 
 
 @dataclasses.dataclass(frozen=True)

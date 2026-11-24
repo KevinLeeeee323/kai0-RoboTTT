@@ -11,11 +11,12 @@ import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
 
+from openpi.models import pi0_config
 import openpi.models.model as _model
+from openpi.training.advantage_dataset import AdvantageLerobotDataset
 import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
-from openpi.training.advantage_dataset import AdvantageLerobotDataset
 
 T_co = TypeVar("T_co", covariant=True)
 
@@ -126,6 +127,44 @@ class FakeDataset(Dataset):
 
     def __len__(self) -> int:
         return self._num_samples
+
+
+def _episode_ranges(dataset: Dataset) -> Iterator[tuple[int, int]]:
+    if isinstance(dataset, TransformedDataset):
+        yield from _episode_ranges(dataset._dataset)  # noqa: SLF001
+    elif isinstance(dataset, lerobot_dataset.MultiLeRobotDataset):
+        offset = 0
+        for child in dataset._datasets:  # noqa: SLF001
+            for start, end in _episode_ranges(child):
+                yield offset + start, offset + end
+            offset += len(child)
+    elif isinstance(dataset, lerobot_dataset.LeRobotDataset):
+        index = dataset.episode_data_index
+        yield from zip(index["from"].tolist(), index["to"].tolist(), strict=True)
+    elif isinstance(dataset, FakeDataset):
+        yield 0, len(dataset)
+    else:
+        raise ValueError("RoboTTT requires LeRobot episode boundaries.")
+
+
+class TrajectoryWindowDataset(Dataset):
+    def __init__(self, dataset: Dataset, config: pi0_config.Pi0TTTConfig):
+        self._dataset = dataset
+        self._length = config.sequence_length
+        self._observation_stride = config.observation_stride
+        span = 1 + (self._length - 1) * self._observation_stride
+        self._starts = []
+        for start, end in _episode_ranges(dataset):
+            self._starts.extend(range(start, end - span + 1, config.sequence_stride))
+        if not self._starts:
+            raise ValueError(f"No episode has the {span} frames required for a RoboTTT window.")
+
+    def __len__(self) -> int:
+        return len(self._starts)
+
+    def __getitem__(self, index: SupportsIndex) -> dict:
+        start = self._starts[index]
+        return _collate_fn([self._dataset[start + t * self._observation_stride] for t in range(self._length)])
 
 
 def create_torch_dataset(
@@ -334,6 +373,8 @@ def create_data_loader(
     logging.info(f"data_config: {data_config}")
 
     if data_config.rlds_data_dir is not None:
+        if isinstance(config.model, pi0_config.Pi0TTTConfig):
+            raise ValueError("RoboTTT trajectory windows require a LeRobot dataset.")
         return create_rlds_data_loader(
             data_config,
             action_horizon=config.model.action_horizon,
@@ -398,6 +439,10 @@ def create_torch_data_loader(
     else:
         dataset = create_torch_dataset(data_config, action_horizon, model_config)
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+    if isinstance(model_config, pi0_config.Pi0TTTConfig):
+        if framework != "jax" or (config is not None and config.advantage_estimator):
+            raise ValueError("RoboTTT requires JAX action-policy training.")
+        dataset = TrajectoryWindowDataset(dataset, model_config)
 
     # Use TorchDataLoader for both frameworks
     # For PyTorch DDP, create DistributedSampler and divide batch size by world size

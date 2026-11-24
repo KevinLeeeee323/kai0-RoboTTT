@@ -34,6 +34,7 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
+from openpi.models import ttt as _ttt
 import openpi.models.lora as lora
 import openpi.shared.array_typing as at
 import openpi.training.sharding as sharding
@@ -290,7 +291,10 @@ class Block(nn.Module):
     dropout_bdims: tuple[int, ...] = ()
 
     @nn.compact
-    def __call__(self, xs, kv_cache, positions, attn_mask, adarms_cond, deterministic=True):  # noqa: FBT002
+    def __call__(
+        self, carry, kv_cache, positions, attn_mask, adarms_cond, deterministic, layer_index, ttt_params, ttt_update
+    ):
+        xs, fast_state = carry
         xs = sharding.activation_sharding_constraint(xs)
         drop = nn.Dropout(self.dropout, self.dropout_bdims) if self.dropout else lambda x, _: x
 
@@ -309,6 +313,25 @@ class Block(nn.Module):
         post_attn = jax.tree.map(lambda x: drop(x, deterministic), post_attn)
         post_attn = sharding.activation_sharding_constraint(post_attn)
         xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, post_attn, gates, strict=True)]
+
+        if ttt_params is not None:
+            # Like LeRobot PI0-TTT, apply memory after the attention residual and before the MLP.
+            num_ttt_layers = ttt_params.gate.shape[0]
+            ttt_index = layer_index - (self.configs[0].depth - num_ttt_layers)
+
+            def apply_ttt(suffix, weights):
+                layer_params = jax.tree.map(lambda x: x[ttt_index], ttt_params)
+                layer_weights = jax.tree.map(lambda x: x[ttt_index], weights)
+                position = fast_state.position - jnp.where(ttt_update, 0, 1)
+                suffix, layer_weights = _ttt.apply_layer(suffix, layer_params, layer_weights, position, ttt_update)
+                return suffix, jax.tree.map(lambda x, layer_x: x.at[ttt_index].set(layer_x), weights, layer_weights)
+
+            suffix, weights = jax.lax.cond(
+                ttt_index >= 0, apply_ttt, lambda suffix, weights: (suffix, weights), xs[1], fast_state.weights
+            )
+            xs[1] = suffix
+            fast_state = fast_state._replace(weights=weights)
+
         xs = sharding.activation_sharding_constraint(xs)
 
         out = []
@@ -330,7 +353,7 @@ class Block(nn.Module):
         xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, out, gates, strict=True)]
         xs = sharding.activation_sharding_constraint(xs)
 
-        return xs, kv_cache
+        return (xs, fast_state), kv_cache
 
 
 KVCache: TypeAlias = tuple[at.Float[at.Array, "l b _t _k _h"], at.Float[at.Array, "l b _t _v _h"]]
@@ -367,12 +390,15 @@ class Module(nn.Module):
             variable_axes={"params": 0},
             split_rngs={"params": True, "dropout": True},
             in_axes=(
-                0,
-                nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-            ),  # 0=kv_cache, 1=positions, 2=mask, 3=adarms_cond, 4=deterministic
+                0,  # KV cache
+                nn.broadcast,  # positions
+                nn.broadcast,  # attention mask
+                nn.broadcast,  # adaRMS conditioning
+                nn.broadcast,  # deterministic
+                0,  # layer index
+                nn.broadcast,  # TTT parameters
+                nn.broadcast,  # whether to update fast weights
+            ),
             length=self.configs[0].depth,
         )(
             configs=self.configs,
@@ -396,19 +422,35 @@ class Module(nn.Module):
         *,
         kv_cache: KVCache | None = None,
         deterministic: bool = True,
-    ) -> tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCache]:
+        ttt: _ttt.TTTContext | None = None,
+    ):
         embedded = jax.tree.map(lambda e: e.astype(self.embed_dtype), embedded)
         mask = jnp.asarray(mask)[:, None, :, :]
         if adarms_cond is None:
             adarms_cond = [None] * len(self.configs)
 
-        embedded, kv_cache = self.layers(embedded, kv_cache, positions, mask, adarms_cond, deterministic)
+        (embedded, fast_state), kv_cache = self.layers(
+            (embedded, None if ttt is None else ttt.state),
+            kv_cache,
+            positions,
+            mask,
+            adarms_cond,
+            deterministic,
+            jnp.arange(self.configs[0].depth),
+            None if ttt is None else ttt.params,
+            False if ttt is None else ttt.update,
+        )
 
         assert all(e.dtype == jnp.dtype(self.embed_dtype) for e in embedded if e is not None)
 
-        return [
+        outputs = [
             f(e, a)[0] if e is not None else e for f, e, a in zip(self.final_norms, embedded, adarms_cond, strict=True)
-        ], kv_cache
+        ]
+        if ttt is None:
+            return outputs, kv_cache
+        sequence_length = embedded[1].shape[0] // fast_state.weights.w1.shape[1]
+        position = fast_state.position + jnp.where(ttt.update, sequence_length, 0)
+        return outputs, kv_cache, fast_state._replace(position=position)
 
     def init(self, use_adarms: Sequence[bool]):
         """Convenience method for initializing all parameters, necessary due to the quirks of linen."""

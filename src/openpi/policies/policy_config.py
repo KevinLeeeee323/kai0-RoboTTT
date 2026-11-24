@@ -5,6 +5,7 @@ from typing import Any
 
 import jax.numpy as jnp
 
+from openpi.models import pi0_config
 import openpi.models.model as _model
 import openpi.policies.policy as _policy
 import openpi.shared.download as download
@@ -54,7 +55,8 @@ def create_trained_policy(
         model = train_config.model.load_pytorch(train_config, weight_path)
         model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     else:
-        model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
+        dtype = None if isinstance(train_config.model, pi0_config.Pi0TTTConfig) else jnp.bfloat16
+        model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=dtype))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
     if norm_stats is None:
         # We are loading the norm stats from the checkpoint instead of the config assets dir to make sure

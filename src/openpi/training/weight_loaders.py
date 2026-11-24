@@ -55,6 +55,17 @@ class CheckpointWeightLoader(WeightLoader):
 
 
 @dataclasses.dataclass(frozen=True)
+class TTTCheckpointWeightLoader(CheckpointWeightLoader):
+    """Warm-start RoboTTT from a Pi0-family checkpoint or another RoboTTT checkpoint."""
+
+    def load(self, params: at.Params) -> at.Params:
+        loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        # A base checkpoint has no TTT parameters. A TTT checkpoint must contain the complete subtree.
+        missing_regex = r".*lora.*" if "ttt" in loaded_params else r"ttt/.*|.*lora.*"
+        return _merge_params(loaded_params, params, missing_regex=missing_regex)
+
+
+@dataclasses.dataclass(frozen=True)
 class PaliGemmaWeightLoader(WeightLoader):
     """Loads weights from the official PaliGemma checkpoint.
 

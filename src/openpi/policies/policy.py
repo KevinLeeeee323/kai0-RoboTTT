@@ -15,6 +15,8 @@ from typing_extensions import override
 
 from openpi import transforms as _transforms
 from openpi.models import model as _model
+from openpi.models import pi0
+from openpi.models import ttt
 from openpi.shared import array_typing as at
 from openpi.shared import nnx_utils
 
@@ -54,6 +56,7 @@ class Policy(BasePolicy):
         self._metadata = metadata or {}
         self._is_pytorch_model = is_pytorch
         self._pytorch_device = pytorch_device
+        self._sample_actions_with_state = None
 
         if self._is_pytorch_model:
             self._model = self._model.to(pytorch_device)
@@ -63,9 +66,23 @@ class Policy(BasePolicy):
             # JAX model setup
             self._sample_actions = nnx_utils.module_jit(model.sample_actions)
             self._rng = rng or jax.random.key(0)
+            if isinstance(model, pi0.Pi0TTT):
+                self._sample_actions_with_state = nnx_utils.module_jit(model.sample_actions_with_state)
 
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
+        outputs, _ = self._infer(obs, noise=noise)
+        return outputs
+
+    def infer_with_state(
+        self, obs: dict, *, fast_state: ttt.FastState | None = None, noise: np.ndarray | None = None
+    ) -> tuple[dict, ttt.FastState]:
+        """Sample with RoboTTT. Pass the returned state to the next observation of the same rollout."""
+        if self._sample_actions_with_state is None:
+            raise ValueError("This policy does not expose RoboTTT fast weights.")
+        return self._infer(obs, noise=noise, fast_state=fast_state, carry_state=True)
+
+    def _infer(self, obs, *, noise, fast_state=None, carry_state=False):
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
@@ -105,10 +122,13 @@ class Policy(BasePolicy):
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
-        outputs = {
-            "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
-        }
+        if carry_state:
+            actions, fast_state = self._sample_actions_with_state(
+                sample_rng_or_pytorch_device, observation, fast_state=fast_state, **sample_kwargs
+            )
+        else:
+            actions = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+        outputs = {"state": inputs["state"], "actions": actions}
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
@@ -119,7 +139,7 @@ class Policy(BasePolicy):
         outputs["policy_timing"] = {
             "infer_ms": model_time * 1000,
         }
-        return outputs
+        return outputs, fast_state
 
     @property
     def metadata(self) -> dict[str, Any]:

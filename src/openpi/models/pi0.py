@@ -9,6 +9,7 @@ from typing_extensions import override
 
 from openpi.models import model as _model
 from openpi.models import pi0_config
+from openpi.models import ttt as _ttt
 import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
@@ -208,6 +209,10 @@ class Pi0(_model.BaseModel):
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
+        loss, _ = self._flow_loss(rng, observation, actions, train=train)
+        return loss
+
+    def _flow_loss(self, rng, observation, actions, *, train, ttt=None):
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
@@ -225,12 +230,18 @@ class Pi0(_model.BaseModel):
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, ar_mask)
         positions = jnp.cumsum(input_mask, axis=1) - 1
-        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+        (_, suffix_out), fast_state = self._forward_experts(
+            [prefix_tokens, suffix_tokens], attn_mask, positions, adarms_cond, ttt
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-        return _action_loss_per_timestep(u_t, v_t, self.action_loss_indices)
+        return _action_loss_per_timestep(u_t, v_t, self.action_loss_indices), fast_state
+
+    def _forward_experts(self, tokens, mask, positions, adarms_cond, ttt, *, kv_cache=None):
+        outputs, _, *fast_state = self.PaliGemma.llm(
+            tokens, mask=mask, positions=positions, adarms_cond=[None, adarms_cond], kv_cache=kv_cache, ttt=ttt
+        )
+        return outputs, fast_state[0] if fast_state else None
 
     @override
     def sample_actions(
@@ -241,6 +252,10 @@ class Pi0(_model.BaseModel):
         num_steps: int | at.Int[at.Array, ""] = 1,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
     ) -> _model.Actions:
+        actions, _ = self._sample_actions(rng, observation, num_steps=num_steps, noise=noise)
+        return actions
+
+    def _sample_actions(self, rng, observation, *, num_steps, noise, ttt=None):
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
@@ -256,7 +271,7 @@ class Pi0(_model.BaseModel):
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 
         def step(carry):
-            x_t, time = carry
+            x_t, time, fast_state = carry
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
@@ -277,22 +292,65 @@ class Pi0(_model.BaseModel):
             # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
             positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
 
-            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+            context = None if ttt is None else ttt._replace(state=fast_state, update=time == 1.0)
+            (prefix_out, suffix_out), fast_state = self._forward_experts(
                 [None, suffix_tokens],
-                mask=full_attn_mask,
-                positions=positions,
+                full_attn_mask,
+                positions,
+                adarms_cond,
+                context,
                 kv_cache=kv_cache,
-                adarms_cond=[None, adarms_cond],
             )
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-            return x_t + dt * v_t, time + dt
+            return x_t + dt * v_t, time + dt, fast_state
 
         def cond(carry):
-            x_t, time = carry
+            _, time, _ = carry
             # robust to floating-point error
             return time >= -dt / 2
 
-        x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
-        return x_0
+        x_0, _, fast_state = jax.lax.while_loop(cond, step, (noise, 1.0, None if ttt is None else ttt.state))
+        return x_0, fast_state
+
+
+class Pi0TTT(Pi0):
+    """Pi0 with trajectory memory in selected action-expert layers."""
+
+    def __init__(self, config: pi0_config.Pi0TTTConfig, rngs: nnx.Rngs):
+        super().__init__(config, rngs)
+        width = _gemma.get_config(config.action_expert_variant).width
+        self.ttt = _ttt.TTT(config.ttt_layers, width, config.ttt_hidden_dim, rngs=rngs)
+
+    def compute_ttt_segment_loss(self, rng, observation, actions, fast_state=None, *, train=False):
+        batch_size, length = actions.shape[:2]
+        fast_state = self.ttt.initial_state(batch_size) if fast_state is None else fast_state
+        observation, actions = jax.tree.map(
+            lambda x: x.reshape(batch_size * length, *x.shape[2:]), (observation, actions)
+        )
+        loss, fast_state = self._flow_loss(
+            rng, observation, actions, train=train, ttt=_ttt.TTTContext(self.ttt.params(), fast_state)
+        )
+        return loss.reshape(batch_size, length, self.action_horizon), fast_state
+
+    @override
+    def compute_loss(self, rng, observation, actions, *, train=False):
+        """Evaluate flow loss for a batch of individual observations."""
+        if actions.ndim != 3:
+            raise ValueError("Use the RoboTTT training step to compute loss on trajectory windows.")
+        observation, actions = jax.tree.map(lambda x: x[:, None], (observation, actions))
+        loss, _ = self.compute_ttt_segment_loss(rng, observation, actions, train=train)
+        return loss[:, 0]
+
+    def sample_actions_with_state(self, rng, observation, *, fast_state=None, num_steps=1, noise=None):
+        """Return the action chunk and the updated per-rollout state. Pass None to start a rollout."""
+        fast_state = self.ttt.initial_state(observation.state.shape[0]) if fast_state is None else fast_state
+        return self._sample_actions(
+            rng, observation, num_steps=num_steps, noise=noise, ttt=_ttt.TTTContext(self.ttt.params(), fast_state)
+        )
+
+    @override
+    def sample_actions(self, rng, observation, *, num_steps=1, noise=None):
+        actions, _ = self.sample_actions_with_state(rng, observation, num_steps=num_steps, noise=noise)
+        return actions

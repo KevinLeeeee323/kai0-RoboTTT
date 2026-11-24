@@ -169,6 +169,21 @@ Example: `XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_flatte
 
 Checkpoints are written to the config’s checkpoint directory. You can then use your checkpoints as inputs to **model arithmetic** (see [Model Arithmetic](#model-arithmetic)).
 
+### RoboTTT fine-tuning
+
+`pi05_flatten_fold_ttt` trains fast-weight memory in the last four π₀.₅ action-expert layers while freezing the base model. The default training window contains 128 observations, and the optimizer steps once per window after backpropagating through segments of 8 observations. The implementation follows the [LeRobot PI0-TTT adaptation](https://github.com/Bala-la-la/lerobot-pi0-ttt).
+
+```bash
+uv run python scripts/compute_norm_states_fast.py --config-name pi05_flatten_fold_ttt --base-dir /path/to/FlattenFold/base
+uv run python scripts/train.py pi05_flatten_fold_ttt --exp-name flatten_fold_ttt \
+  --data.repo-id /path/to/FlattenFold/base \
+  --weight-loader.params-path /path/to/pi05_checkpoint/params
+```
+
+`--model.observation-stride` sets the frame interval between memory updates. Match it to how often the policy receives a new observation during rollout. `--model.sequence-stride` sets the interval between training window starts.
+
+Load the trained checkpoint with `create_trained_policy` and the same TTT model configuration. For in-process rollouts, call `policy.infer_with_state(observation, fast_state=state)` and carry the returned state until the episode ends. Passing `None` starts a new episode. The existing `infer()` call starts from the learned initial state each time.
+
 ## Project Overview
 
 ```
